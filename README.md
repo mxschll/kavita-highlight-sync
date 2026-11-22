@@ -57,9 +57,14 @@ If you've changed your Kavita highlight slot colours, edit `COLOR_TO_SLOT` and `
 - A Kavita highlight whose text can't be found in the book (e.g. one made in an older version of the file) is skipped and counted as *couldn't be placed*. It's retried on every sync.
 - Kavita has no "changed since" API, so each sync fetches the annotations for the open book only. That's fast, but books you don't open aren't synced.
 
+## Troubleshooting
+
+If a sync reports failed changes, the message shows the first error (HTTP status plus Kavita's reply). The full details are in KOReader's `crash.log`, on lines starting with `KavitaHL:`.
+
 ## Development
 
 `tests/` holds tests that run outside KOReader with any Lua 5.1+ (`cd tests && lua test_mapping.lua`, or `texlua`):
 
 - `test_mapping.lua`: xpointer/XPath conversion, colours, notes and the sync planner.
 - `test_sync.lua`: whole sync runs against a fake KOReader document and a fake Kavita server.
+- `test_api.lua`: HTTP handling (redirects on POST/DELETE, error messages).

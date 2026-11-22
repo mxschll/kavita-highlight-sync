@@ -58,34 +58,51 @@ function KavitaApi:request(method, path, body)
 end
 
 function KavitaApi:_raw(method, path, body)
-    local url = self.base_url .. path
-    local sink = {}
-    local headers = {
-        ["x-api-key"] = self.api_key,
-        ["Accept"] = "application/json",
-    }
-    if self.token then headers["Authorization"] = "Bearer " .. self.token end
-    local source
+    local encoded
     if body ~= nil then
-        local encoded, err = rapidjson.encode(body)
+        local err
+        encoded, err = rapidjson.encode(body)
         if not encoded then return nil, "encode failed: " .. tostring(err) end
-        headers["Content-Type"] = "application/json"
-        headers["Content-Length"] = tostring(#encoded)
-        source = ltn12.source.string(encoded)
     end
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
-    local code, _, status = socket.skip(1, http.request{
-        url = url,
-        method = method,
-        headers = headers,
-        source = source,
-        sink = ltn12.sink.table(sink),
-    })
-    socketutil:reset_timeout()
-    local raw = table.concat(sink)
+    local code, resp_headers, status, raw
+    -- LuaSocket only follows redirects for GET, so a reverse proxy redirecting
+    -- http -> https (or adding a slash) silently breaks POST/DELETE. Follow them here.
+    for _ = 1, 4 do
+        local sink = {}
+        local headers = {
+            ["x-api-key"] = self.api_key,
+            ["Accept"] = "application/json",
+        }
+        if self.token then headers["Authorization"] = "Bearer " .. self.token end
+        if encoded then
+            headers["Content-Type"] = "application/json"
+            headers["Content-Length"] = tostring(#encoded)
+        end
+        socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+        code, resp_headers, status = socket.skip(1, http.request{
+            url = self.base_url .. path,
+            method = method,
+            headers = headers,
+            source = encoded and ltn12.source.string(encoded) or nil,
+            sink = ltn12.sink.table(sink),
+            redirect = false,
+        })
+        socketutil:reset_timeout()
+        raw = table.concat(sink)
+        local location = type(resp_headers) == "table" and resp_headers.location
+        if not (type(code) == "number" and code >= 300 and code < 400 and location) then break end
+        -- Rebase on the redirect target so later calls go straight there
+        local new_base = location:match("^(https?://.-)/api/")
+        if not new_base then break end
+        logger.info("KavitaHL: following redirect to", new_base)
+        self.base_url = new_base
+    end
     if type(code) ~= "number" or code < 200 or code >= 300 then
-        logger.warn("KavitaHL:", method, self:redact(path), code, raw:sub(1, 300))
-        return nil, string.format("%s %s → %s", method, self:redact(path), tostring(status or code)), code
+        local detail = (raw or ""):gsub("%s+", " "):sub(1, 160)
+        logger.warn("KavitaHL:", method, self:redact(path), code, detail)
+        local msg = string.format("%s %s → %s", method, (self:redact(path):gsub("%?.*$", "")), tostring(code or status))
+        if detail ~= "" then msg = msg .. ": " .. detail end
+        return nil, msg, code
     end
     if raw == "" then return true end
     local decoded = rapidjson.decode(raw)

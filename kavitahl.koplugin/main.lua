@@ -325,7 +325,7 @@ function KavitaHL:newRemoteDto(l, link)
         containsSpoiler = false,
         pageNumber = page,
         selectedSlotIndex = Map.colorToSlot(l.color),
-        chapterTitle = l.item.chapter,
+        chapterTitle = type(l.item.chapter) == "string" and l.item.chapter or nil,
         chapterId = link.chapter_id,
         volumeId = link.volume_id or 0,
         seriesId = link.series_id or 0,
@@ -421,9 +421,12 @@ function KavitaHL:sync(opts)
     end
     if s.failed > 0 then
         summary = summary .. "\n" .. T(_("%1 changes failed; they'll be retried next time."), s.failed)
+        if s.first_error then
+            summary = summary .. "\n\n" .. T(_("First error: %1"), s.first_error)
+        end
     end
     if opts.interactive then
-        UIManager:show(InfoMessage:new{ text = summary, timeout = 4 })
+        UIManager:show(InfoMessage:new{ text = summary, timeout = s.failed > 0 and nil or 4 })
     elseif s.sent + s.received + s.updated + s.deleted > 0 then
         UIManager:show(Notification:new{ text = summary })
     end
@@ -470,12 +473,18 @@ function KavitaHL:_sync(api, opts)
     local items = state.items
     local function snap(k, note, slot) return { key = k, note = note, slot = slot } end
 
+    local function failed(err)
+        stats.failed = stats.failed + 1
+        stats.first_error = stats.first_error or err
+    end
+
     for _, d in ipairs(plan.delete_remote) do
-        if api:deleteAnnotation(d) then
+        local res, err = api:deleteAnnotation(d)
+        if res then
             items[tostring(d)] = nil
             stats.deleted = stats.deleted + 1
         else
-            stats.failed = stats.failed + 1
+            failed(err)
         end
     end
     -- Snapshot entries whose two sides are both gone are dropped
@@ -485,22 +494,28 @@ function KavitaHL:_sync(api, opts)
 
     for _, u in ipairs(plan.update_remote) do
         local slot = Map.colorToSlot(u.l.color)
-        if api:updateAnnotation(self:updateRemoteDto(remote_by_id[tostring(u.id)], u.l.note, slot)) then
+        local res, err = api:updateAnnotation(self:updateRemoteDto(remote_by_id[tostring(u.id)], u.l.note, slot))
+        if res then
             items[tostring(u.id)] = snap(u.l.key, u.l.note, slot)
             stats.updated = stats.updated + 1
         else
-            stats.failed = stats.failed + 1
+            failed(err)
         end
     end
 
     for _, l in ipairs(plan.create_remote) do
         local dto = self:newRemoteDto(l, state)
-        local res = dto and api:createAnnotation(dto)
+        local res, err
+        if dto then
+            res, err = api:createAnnotation(dto)
+        else
+            err = T(_("Unsupported position: %1"), tostring(l.item.pos0))
+        end
         if type(res) == "table" and res.id then
             items[tostring(res.id)] = snap(l.key, l.note, dto.selectedSlotIndex)
             stats.sent = stats.sent + 1
         else
-            stats.failed = stats.failed + 1
+            failed(err or _("Kavita returned no annotation"))
         end
     end
 
@@ -508,9 +523,11 @@ function KavitaHL:_sync(api, opts)
         -- Same highlight on both sides but no history: merge (a local note wins over a remote one)
         local note = k.l.note or k.r.note
         local slot = Map.colorToSlot(k.l.color)
-        local good = true
+        local good, err = true, nil
         if Map.normalize(note or "") ~= Map.normalize(k.r.note or "") or slot ~= k.r.slot then
-            good = api:updateAnnotation(self:updateRemoteDto(k.r, note, slot)) and true or false
+            local res
+            res, err = api:updateAnnotation(self:updateRemoteDto(k.r, note, slot))
+            good = res and true or false
         end
         if good and note ~= k.l.note then
             self:updateLocal(k.l.key, { note = note })
@@ -518,7 +535,7 @@ function KavitaHL:_sync(api, opts)
         if good then
             items[tostring(k.id)] = snap(k.l.key, note, slot)
         else
-            stats.failed = stats.failed + 1
+            failed(err)
         end
     end
 
