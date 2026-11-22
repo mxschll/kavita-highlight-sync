@@ -60,14 +60,15 @@ local function newUI()
   return ui
 end
 
--- Fake Kavita ---------------------------------------------------------------
+-- Fake Kavita (behaves like 0.9.1: trusts library/volume/series ids from the client) ---------------------------------------------------------------
 local server = { anns = {}, next_id = 100 }
 local api = {}
 function api:whoami() return "joe" end
 function api:findChapterByHash(hash) assert(hash:upper() == "ABC123"); return { chapter_id = 7, volume_id = 3, series_id = 1 } end
+function api:getLibraryId(series) assert(series == 1); return 4 end
 function api:getAnnotations(ch) assert(ch == 7); local out = {}; for _, a in pairs(server.anns) do out[#out + 1] = a end; table.sort(out, function(x, y) return x.id < y.id end); return out end
 function api:createAnnotation(dto)
-  assert(dto.chapterId == 7 and dto.xPath and dto.highlightCount > 0, "bad create dto")
+  assert(dto.chapterId == 7 and dto.libraryId == 4 and dto.volumeId == 3 and dto.seriesId == 1 and dto.xPath and dto.highlightCount > 0, "bad create dto")
   server.next_id = server.next_id + 1; dto.id = server.next_id; dto.ownerUsername = "joe"
   dto.commentPlainText = dto.commentHtml and Map.htmlToText(dto.commentHtml)
   server.anns[dto.id] = dto; return dto
@@ -141,6 +142,11 @@ server.anns[9] = { id = 9, ownerUsername = "joe", selectedText = "boiled cabbage
 local before = #uiA.annotation.annotations
 pA:_sync(api, { push_only = true })
 ok(#uiA.annotation.annotations == before, "push-only leaves local alone")
+
+-- A link cached by the previous plugin version (no library id) gets upgraded
+uiA.doc_settings.data.kavita_highlights.library_id = nil
+r = pA:_sync(api, {})
+ok(r.stats and uiA.doc_settings.data.kavita_highlights.library_id == 4, "old link upgraded with library id")
 
 print(string.format("%d/%d passed", n - fails, n))
 os.exit(fails == 0 and 0 or 1)

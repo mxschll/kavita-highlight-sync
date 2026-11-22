@@ -169,6 +169,14 @@ function KavitaApi:_scanSeries(series_id, hash)
     end
 end
 
+--- Library a series belongs to. Released Kavita (0.9.x) stores the library, volume and
+-- series ids exactly as the client sends them, so they must be right.
+function KavitaApi:getLibraryId(series_id)
+    local s, err = self:request("GET", "/api/series/" .. series_id)
+    if type(s) == "table" and s.libraryId then return s.libraryId end
+    return nil, err
+end
+
 -- Annotations ------------------------------------------------------------------
 
 function KavitaApi:getAnnotations(chapter_id)

@@ -329,7 +329,7 @@ function KavitaHL:newRemoteDto(l, link)
         chapterId = link.chapter_id,
         volumeId = link.volume_id or 0,
         seriesId = link.series_id or 0,
-        libraryId = 0,
+        libraryId = link.library_id or 0,
         ownerUserId = 0,
     }
 end
@@ -357,7 +357,14 @@ end
 function KavitaHL:resolveLink(api, state)
     local hash = self:getHash()
     if not hash then return nil, _("Could not compute this book's hash.") end
-    if state.chapter_id and state.hash == hash then return state end
+    if state.chapter_id and state.hash == hash then
+        if not state.library_id then -- links made by older plugin versions
+            local lib, err = api:getLibraryId(state.series_id)
+            if not lib then return nil, err or _("Could not read the book's Kavita library.") end
+            state.library_id = lib
+        end
+        return state
+    end
 
     local props = self.ui.doc_props or {}
     local _, filename = util.splitFilePathName(self.ui.document.file)
@@ -366,8 +373,11 @@ function KavitaHL:resolveLink(api, state)
     if not found then
         return nil, _("This book wasn't found in Kavita. Make sure the file on this device is the same file Kavita has (Kavita matches books by file hash).")
     end
+    local library_id, lib_err = api:getLibraryId(found.series_id)
+    if not library_id then return nil, lib_err or _("Could not read the book's Kavita library.") end
     return {
         hash = hash,
+        library_id = library_id,
         chapter_id = found.chapter_id,
         volume_id = found.volume_id,
         series_id = found.series_id,
