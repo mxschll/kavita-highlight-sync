@@ -63,6 +63,8 @@ If a sync reports failed changes, the message shows the first error (HTTP status
 
 ## Development
 
+CI runs these on LuaJIT, Lua 5.1 and Lua 5.4 for every push and pull request.
+
 `tests/` holds tests that run outside KOReader with any Lua 5.1+ (`cd tests && lua test_mapping.lua`, or `texlua`):
 
 - `test_mapping.lua`: xpointer/XPath conversion, colours, notes and the sync planner.
