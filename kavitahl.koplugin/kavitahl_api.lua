@@ -52,9 +52,14 @@ end
 function KavitaApi:request(method, path, body)
     local res, err, code = self:_raw(method, path, body)
     if code == 401 and not self.token and self:login() then
-        res, err = self:_raw(method, path, body)
+        res, err, code = self:_raw(method, path, body)
     end
-    return res, err
+    return res, err, code
+end
+
+--- True when a failed request may still have reached the server (no reply in time).
+function KavitaApi.isTimeout(code)
+    return code == "timeout" or code == "wantread" or code == "closed"
 end
 
 function KavitaApi:_raw(method, path, body)
@@ -78,7 +83,13 @@ function KavitaApi:_raw(method, path, body)
             headers["Content-Type"] = "application/json"
             headers["Content-Length"] = tostring(#encoded)
         end
-        socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+        -- Kavita re-reads the EPUB's table of contents on every create, which can be slow
+        -- on big books or a busy server: give writes more time than reads.
+        if encoded or method ~= "GET" then
+            socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+        else
+            socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+        end
         code, resp_headers, status = socket.skip(1, http.request{
             url = self.base_url .. path,
             method = method,

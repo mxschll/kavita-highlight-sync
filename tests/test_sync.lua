@@ -14,7 +14,7 @@ stub("ffi/util", { template = function(s, ...) local a = { ... }; return (s:gsub
 stub("gettext", function(s) return s end)
 local settings_store = {}
 stub("luasettings", { open = function() return { readSetting = function(_, k, d) settings_store[k] = settings_store[k] or d; return settings_store[k] end, saveSetting = function() end, flush = function() end } end })
-stub("kavitahl_api", {})
+stub("kavitahl_api", { isTimeout = function(c) return c == "timeout" end })
 
 local KavitaHL = require("main")
 local Map = require("kavitahl_mapping")
@@ -142,6 +142,29 @@ server.anns[9] = { id = 9, ownerUsername = "joe", selectedText = "boiled cabbage
 local before = #uiA.annotation.annotations
 pA:_sync(api, { push_only = true })
 ok(#uiA.annotation.annotations == before, "push-only leaves local alone")
+
+-- Timeouts on create: one was saved by Kavita anyway, one never arrived
+local uiC = newUI()
+local pC = setmetatable({ ui = uiC, view = { highlight = {} } }, { __index = KavitaHL }); pC:init()
+uiC.doc_settings.data.partial_md5_checksum = "abc123"
+server.anns = {}
+uiC.annotation.annotations = {
+  { drawer = "lighten", color = "yellow", pos0 = xp(1, 0), pos1 = xp(1, 6), text = "It was" },
+  { drawer = "lighten", color = "yellow", pos0 = xp(3, 4), pos1 = xp(3, 12), text = "hallway" },
+}
+local real_create = api.createAnnotation
+local n_calls = 0
+api.createAnnotation = function(self, dto)
+  n_calls = n_calls + 1
+  if n_calls == 1 then real_create(self, dto); return nil, "POST → timeout", "timeout" end
+  return nil, "POST → timeout", "timeout"
+end
+r = pC:_sync(api, {})
+ok(r.stats.sent == 1 and r.stats.failed == 1, "timed-out create recovered once, other retried later")
+ok(count(server.anns) == 1, "no duplicate after timeout")
+api.createAnnotation = real_create
+r = pC:_sync(api, {})
+ok(r.stats.sent == 1 and r.stats.failed == 0 and count(server.anns) == 2, "next sync sends the missing one only")
 
 -- A link cached by the previous plugin version (no library id) gets upgraded
 uiA.doc_settings.data.kavita_highlights.library_id = nil

@@ -513,19 +513,47 @@ function KavitaHL:_sync(api, opts)
         end
     end
 
+    local unconfirmed = {} -- creates that timed out: Kavita may have saved them anyway
     for _, l in ipairs(plan.create_remote) do
         local dto = self:newRemoteDto(l, state)
-        local res, err
+        local res, err, code
         if dto then
-            res, err = api:createAnnotation(dto)
+            res, err, code = api:createAnnotation(dto)
         else
             err = T(_("Unsupported position: %1"), tostring(l.item.pos0))
         end
         if type(res) == "table" and res.id then
             items[tostring(res.id)] = snap(l.key, l.note, dto.selectedSlotIndex)
             stats.sent = stats.sent + 1
+        elseif KavitaApi.isTimeout(code) then
+            unconfirmed[#unconfirmed + 1] = { l = l, slot = dto.selectedSlotIndex, err = err }
         else
             failed(err or _("Kavita returned no annotation"))
+        end
+    end
+    if #unconfirmed > 0 then
+        -- Check what actually arrived instead of re-sending, which could duplicate
+        local fresh = api:getAnnotations(state.chapter_id)
+        local known = {}
+        for id in pairs(items) do known[id] = true end
+        for _, u in ipairs(unconfirmed) do
+            local match
+            for _, dto in ipairs(type(fresh) == "table" and fresh or {}) do
+                local id = tostring(dto.id)
+                if not known[id] and type(dto.ownerUsername) == "string"
+                        and dto.ownerUsername:lower() == username:lower()
+                        and Map.normalize(dto.selectedText) == Map.normalize(u.l.text) then
+                    match = id
+                    break
+                end
+            end
+            if match then
+                known[match] = true
+                items[match] = snap(u.l.key, u.l.note, u.slot)
+                stats.sent = stats.sent + 1
+            else
+                failed(u.err)
+            end
         end
     end
 
