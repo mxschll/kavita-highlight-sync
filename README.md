@@ -1,6 +1,6 @@
 # Kavita highlight sync for KOReader
 
-Two-way sync of EPUB **highlights and notes** between KOReader and Kavita (0.8.8+, the first release with annotations).
+Two-way sync of EPUB **highlights and notes** between KOReader and Kavita.
 
 - Highlights you make in KOReader show up in Kavita's web reader and annotation list.
 - Highlights you make in Kavita's web reader appear in KOReader.
@@ -20,21 +20,24 @@ If KOReader's **Progress sync** already points at Kavita (custom server `https:/
 If it doesn't, open a book, then go to **Tools ▸ Kavita highlight sync ▸ Server settings** and enter:
 
 - **Server URL**: `https://kavita.example.com`
-- **API / auth key**: in Kavita, open User settings. On 0.9+ it's under *Manage auth keys*; on 0.8 it's under *3rd party clients*.
+- **API / auth key**: the same key Kavita's [KOReader setup guide](https://wiki.kavitareader.com/guides/3rdparty/koreader/) tells you to create.
 
 ## Use
 
-- **Tools ▸ Kavita highlight sync ▸ Sync highlights now** syncs the open book.
-- **Sync automatically on open and close** syncs when you open a book and pushes your local changes when you close it. It only runs if Wi-Fi is already on, so you won't get Wi-Fi prompts. The push on close stops starting new writes after 20 seconds; whatever is left goes with the next sync.
+Open a book, then go to **Tools ▸ Kavita highlight sync**.
+
+![The plugin's menu under Tools](docs/menu.png)
+
+- **Sync highlights now** syncs the open book.
+- **Sync automatically on open and close** syncs when you open a book and pushes your local changes when you close it. It only runs if Wi-Fi is already on.
+- **Re-match this book with Kavita** forgets the cached link and sync history for the open book. The next sync matches existing highlights by text, so nothing is duplicated.
 
 ## How it works
 
-- **Finding the book.** Kavita stores KOReader's partial-MD5 hash for every file (it uses it for progress sync). The plugin searches Kavita by the book's title and filename, then picks the file whose hash matches. The link is cached per book, so the search only runs once.
-- **KOReader → Kavita.** The highlight's xpointer (`/body/DocFragment[5]/body/div/p[3]/text().12`) becomes Kavita's page number (4) and block XPath (`//body/div[1]/p[3]`). The text, note and colour go with it. Kavita finds the exact characters by matching the text inside that block, the same way it does for Kobo highlights.
-- **Kavita → KOReader.** The plugin searches the open book for the highlighted text, limited to the right spine item (and the right paragraph when Kavita gives a plain XPath). Long or multi-paragraph highlights are found by their start and end.
-- **Two-way merge.** A per-book snapshot of the last sync, stored in the book's sidecar, tells apart "deleted here" from "new there". If a highlight was changed on both sides, the KOReader version wins. When KOReader moves a highlight's position (it does that after an engine update) but the text is the same, the Kavita annotation is kept, not recreated.
-- **No duplicates.** If the sync history is missing (a second device, or after *Re-match this book*), highlights with identical text are linked rather than duplicated.
-- **Safety check.** If one sync would delete more than half of the synced highlights (more than 3), or Kavita returns none of your highlights for a book that has synced ones, it asks first. Automatic syncs hold those deletions, and any new highlights, until you run *Sync highlights now*.
+- **Finding the book.** Kavita already stores a hash of every file for KOReader progress sync. The plugin uses it to find the matching book, and remembers the match per book.
+- **Two-way merge.** The plugin remembers the state of the last sync per book, so it can tell a highlight you deleted from one that is new on the other side. If a highlight was changed on both sides, the KOReader version wins.
+- **No duplicates.** On a second device, or after *Re-match this book*, highlights with identical text are linked rather than duplicated.
+- **Safety check.** If one sync would delete more than half of your synced highlights (and more than 3), or Kavita returns none of them for a book that has synced ones, it asks first. Automatic syncs hold those changes back until you run *Sync highlights now*.
 
 ### Colours
 
@@ -50,12 +53,9 @@ If you've changed your Kavita highlight slot colours, edit `COLOR_TO_SLOT` and `
 
 ## Limitations
 
-- EPUB only. Kavita has no annotations for PDFs or comics.
-- The file on your device must be byte-identical to the one in Kavita. Downloading it through Kavita's OPDS feed guarantees that. A converted or re-saved copy won't match.
-- Only your own Kavita annotations sync. Highlights other users share with you are ignored.
-- Spoiler flags and likes stay Kavita-only. Comments are synced as plain text.
-- A Kavita highlight whose text can't be found in the book (e.g. one made in an older version of the file) is skipped and counted as *couldn't be placed*. It's retried on every sync.
-- Kavita has no "changed since" API, so each sync fetches the annotations for the open book only. That's fast, but books you don't open aren't synced.
+- The file on your device must be byte-identical to the one in Kavita, because Kavita matches books by file hash. Downloading it through Kavita's OPDS feed guarantees that; a converted or re-saved copy won't match.
+- Only your own Kavita annotations sync. Spoiler flags and likes stay in Kavita; comments sync as plain text.
+- A Kavita highlight whose text can't be found in the book (e.g. made in another edition) is reported as *couldn't be placed* and retried on every sync.
 
 ## Troubleshooting
 
