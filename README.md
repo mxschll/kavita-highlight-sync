@@ -25,16 +25,16 @@ If it doesn't, open a book, then go to **Tools ▸ Kavita highlight sync ▸ Ser
 ## Use
 
 - **Tools ▸ Kavita highlight sync ▸ Sync highlights now** syncs the open book.
-- **Sync automatically on open and close** syncs when you open a book and pushes your local changes when you close it. It only runs if Wi-Fi is already on, so you won't get Wi-Fi prompts.
+- **Sync automatically on open and close** syncs when you open a book and pushes your local changes when you close it. It only runs if Wi-Fi is already on, so you won't get Wi-Fi prompts. The push on close stops starting new writes after 20 seconds; whatever is left goes with the next sync.
 
 ## How it works
 
 - **Finding the book.** Kavita stores KOReader's partial-MD5 hash for every file (it uses it for progress sync). The plugin searches Kavita by the book's title and filename, then picks the file whose hash matches. The link is cached per book, so the search only runs once.
 - **KOReader → Kavita.** The highlight's xpointer (`/body/DocFragment[5]/body/div/p[3]/text().12`) becomes Kavita's page number (4) and block XPath (`//body/div[1]/p[3]`). The text, note and colour go with it. Kavita finds the exact characters by matching the text inside that block, the same way it does for Kobo highlights.
 - **Kavita → KOReader.** The plugin searches the open book for the highlighted text, limited to the right spine item (and the right paragraph when Kavita gives a plain XPath). Long or multi-paragraph highlights are found by their start and end.
-- **Two-way merge.** A per-book snapshot of the last sync, stored in the book's sidecar, tells apart "deleted here" from "new there". If a highlight was changed on both sides, the KOReader version wins.
+- **Two-way merge.** A per-book snapshot of the last sync, stored in the book's sidecar, tells apart "deleted here" from "new there". If a highlight was changed on both sides, the KOReader version wins. When KOReader moves a highlight's position (it does that after an engine update) but the text is the same, the Kavita annotation is kept, not recreated.
 - **No duplicates.** If the sync history is missing (a second device, or after *Re-match this book*), highlights with identical text are linked rather than duplicated.
-- **Safety check.** If one sync would delete more than half of the synced highlights (more than 3), it asks first. Automatic syncs skip those deletions instead.
+- **Safety check.** If one sync would delete more than half of the synced highlights (more than 3), or Kavita returns none of your highlights for a book that has synced ones, it asks first. Automatic syncs hold those deletions, and any new highlights, until you run *Sync highlights now*.
 
 ### Colours
 

@@ -26,6 +26,7 @@ local Map = require("kavitahl_mapping")
 
 local STATE_KEY = "kavita_highlights"
 local SEARCH_FLAGS = 0x00FF -- KOReader's default: case/space/quote-insensitive matching
+local CLOSE_TIME_BUDGET = 20 -- seconds
 
 local KavitaHL = WidgetContainer:extend{
     name = "kavitahl",
@@ -157,7 +158,8 @@ end
 
 function KavitaHL:onCloseDocument()
     if self.settings.auto_sync and self:isSupported() and self:getConfig() and NetworkMgr:isOnline() then
-        self:sync{ interactive = false, push_only = true }
+        -- Closing blocks until this returns, so stop sending after a while; the rest goes next time
+        self:sync{ interactive = false, push_only = true, deadline = os.time() + CLOSE_TIME_BUDGET }
         -- Doc settings were already saved before CloseDocument, so persist our state now.
         self.ui.doc_settings:flush()
     end
@@ -178,6 +180,7 @@ function KavitaHL:localItems()
                 text = item.text or "",
                 note = item.note,
                 color = item.color,
+                page = (Map.xpointerToKavita(item.pos0)),
                 item = item,
             }
         end
@@ -198,35 +201,43 @@ end
 function KavitaHL:locate(r)
     local doc = self.ui.document
     local prefix, frag = Map.kavitaToXPointerPrefix(r.page, r.xpath)
-    local loose_prefix = prefix and Map.looseXPath(prefix)
+    local frag_no = Map.fragmentOf(frag)
     local head, tail = Map.searchPatterns(r.text)
     if head == "" then return nil end
-
-    local function inFrag(xp)
-        return xp:sub(1, #frag + 1) == frag .. "/" or xp:sub(1, #frag + 1) == frag .. "."
-    end
 
     local hits = doc:findAllText(head, true, 0, 1000, false, SEARCH_FLAGS) or {}
     local best, fallback
     for _, h in ipairs(hits) do
-        if inFrag(h.start) then
-            if loose_prefix and Map.looseXPath(h.start):sub(1, #loose_prefix) == loose_prefix then
+        if Map.underPath(h.start, frag) then
+            if prefix and Map.underPath(h.start, prefix) then
                 best = h
                 break
             end
             fallback = fallback or h
         end
     end
-    best = best or fallback or (#hits == 1 and hits[1]) or nil
+    best = best or fallback
+    -- Kavita's page may be off by one from CREngine's spine numbering; a lone hit in a
+    -- neighbouring fragment is still the right place. Further away it's another chapter.
+    if not best and #hits == 1 then
+        local hit_frag = Map.fragmentOf(hits[1].start)
+        if hit_frag and math.abs(hit_frag - frag_no) <= 1 then
+            logger.info("KavitaHL: placing", r.id, "in fragment", hit_frag, "instead of", frag_no)
+            best = hits[1]
+        end
+    end
     if not best then return nil end
 
     local pos0, pos1 = best.start, best["end"]
     if tail then
         pos1 = nil
+        local start_frag = Map.fragmentOf(pos0)
         local tail_hits = doc:findAllText(tail, true, 0, 1000, false, SEARCH_FLAGS) or {}
         for _, h in ipairs(tail_hits) do
             local order = doc:compareXPointers(pos0, h.start)
-            if order and order >= 0 then
+            local tail_frag = Map.fragmentOf(h.start)
+            -- A tail in a later chapter means a different edition, not a chapter-long highlight
+            if order and order >= 0 and tail_frag and start_frag and tail_frag - start_frag <= 1 then
                 pos1 = h["end"]
                 break
             end
@@ -251,6 +262,7 @@ function KavitaHL:createLocal(r)
         drawer = self.view.highlight.saved_drawer or "lighten",
         color = Map.slotToColor(r.slot),
         note = r.note,
+        datetime = os.date("%Y-%m-%d %H:%M:%S"),
     }
     if self.ui.highlight.getHighlightChapter then
         item.chapter = self.ui.highlight:getHighlightChapter(pos0)
@@ -276,6 +288,7 @@ function KavitaHL:updateLocal(key, r)
     if not item then return false end
     local had_note, has_note = item.note ~= nil, r.note ~= nil
     item.note = r.note
+    item.datetime_updated = os.date("%Y-%m-%d %H:%M:%S")
     -- Only recolor when the Kavita slot really differs (keeps e.g. red vs. orange intact)
     if r.slot ~= nil and Map.colorToSlot(item.color) ~= r.slot then
         item.color = Map.slotToColor(r.slot)
@@ -435,9 +448,15 @@ function KavitaHL:sync(opts)
             summary = summary .. "\n\n" .. T(_("First error: %1"), s.first_error)
         end
     end
+    if s.deferred > 0 then
+        summary = summary .. "\n" .. T(_("%1 changes ran out of time; they'll be sent next time."), s.deferred)
+    end
+    if s.held > 0 then
+        summary = summary .. "\n" .. T(_("%1 changes held back because they would delete many highlights. Use \"Sync highlights now\" to review them."), s.held)
+    end
     if opts.interactive then
         UIManager:show(InfoMessage:new{ text = summary, timeout = s.failed > 0 and nil or 4 })
-    elseif s.sent + s.received + s.updated + s.deleted > 0 then
+    elseif s.sent + s.received + s.updated + s.deleted + s.deferred + s.held > 0 then
         UIManager:show(Notification:new{ text = summary })
     end
 end
@@ -453,7 +472,10 @@ function KavitaHL:_sync(api, opts)
     state.items = state.items or {}
 
     local dtos, get_err = api:getAnnotations(state.chapter_id)
-    if type(dtos) ~= "table" then return { error = get_err or _("Could not read Kavita annotations.") } end
+    -- An error object decodes to a table too; reading it as an empty list would delete every local highlight
+    if type(dtos) ~= "table" or (dtos[1] == nil and next(dtos) ~= nil) then
+        return { error = get_err or _("Could not read Kavita annotations.") }
+    end
     local remotes, remote_by_id = {}, {}
     for _, dto in ipairs(dtos) do
         if type(dto.ownerUsername) == "string" and dto.ownerUsername:lower() == username:lower() then
@@ -468,19 +490,28 @@ function KavitaHL:_sync(api, opts)
 
     local plan = Map.plan(locals, remotes, state.items)
 
-    -- Guard against wiping highlights after something odd (e.g. the book file changed)
+    -- Guard against wiping highlights after something odd (e.g. the book file changed, or
+    -- Kavita answered with nobody's highlights)
     local n_state = 0
     for _ in pairs(state.items) do n_state = n_state + 1 end
     local n_del = Map.countDeletions(plan)
-    if n_del > 3 and n_del * 2 > n_state and not opts.allow_mass_delete then
+    local suspicious = (n_del > 3 and n_del * 2 > n_state)
+        or (#remotes == 0 and n_state > 0 and #plan.delete_local > 0)
+    local held = 0
+    if suspicious and not opts.allow_mass_delete then
         if opts.interactive then
             return { confirm = T(_("This sync would delete %1 highlights (on this device or in Kavita). Continue?"), n_del) }
         end
-        plan.delete_local, plan.delete_remote = {}, {}
+        -- Creating remotes while their deletions wait would show duplicates in Kavita
+        held = n_del + #plan.create_remote
+        plan.delete_local, plan.delete_remote, plan.create_remote = {}, {}, {}
     end
 
-    local stats = { sent = 0, received = 0, updated = 0, deleted = 0, unplaced = 0, failed = 0 }
+    local stats = { sent = 0, received = 0, updated = 0, deleted = 0, unplaced = 0, failed = 0, deferred = 0, held = held }
     local items = state.items
+    for _, k in ipairs(plan.rekey) do
+        items[tostring(k.id)].key = k.key
+    end
     local function snap(k, note, slot) return { key = k, note = note, slot = slot } end
 
     local function failed(err)
@@ -488,7 +519,16 @@ function KavitaHL:_sync(api, opts)
         stats.first_error = stats.first_error or err
     end
 
-    for _, d in ipairs(plan.delete_remote) do
+    -- Writes left over when the time budget runs out stay out of the snapshot and go next time
+    local function outOfTime(list, i)
+        if opts.deadline and os.time() >= opts.deadline then
+            stats.deferred = stats.deferred + #list - i + 1
+            return true
+        end
+    end
+
+    for i, d in ipairs(plan.delete_remote) do
+        if outOfTime(plan.delete_remote, i) then break end
         local res, err = api:deleteAnnotation(d)
         if res then
             items[tostring(d)] = nil
@@ -502,7 +542,8 @@ function KavitaHL:_sync(api, opts)
         if not local_by_key[s.key] and not remote_by_id[id] then items[id] = nil end
     end
 
-    for _, u in ipairs(plan.update_remote) do
+    for i, u in ipairs(plan.update_remote) do
+        if outOfTime(plan.update_remote, i) then break end
         local slot = Map.colorToSlot(u.l.color)
         local res, err = api:updateAnnotation(self:updateRemoteDto(remote_by_id[tostring(u.id)], u.l.note, slot))
         if res then
@@ -514,7 +555,8 @@ function KavitaHL:_sync(api, opts)
     end
 
     local unconfirmed = {} -- creates that timed out: Kavita may have saved them anyway
-    for _, l in ipairs(plan.create_remote) do
+    for i, l in ipairs(plan.create_remote) do
+        if outOfTime(plan.create_remote, i) then break end
         local dto = self:newRemoteDto(l, state)
         local res, err, code
         if dto then

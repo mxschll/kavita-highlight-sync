@@ -34,6 +34,26 @@ local function urlencode(s)
 end
 KavitaApi.urlencode = urlencode
 
+local function splitUrl(url)
+    local scheme, authority = url:match("^(https?)://([^/]*)")
+    -- LuaSocket reads "user@host" in the authority; a redirect could hide another host behind it
+    if not scheme or authority:find("@", 1, true) then return nil end
+    local host, port = authority:match("^(%[[^%]]+%]):?(%d*)$")
+    if not host then host, port = authority:match("^([^:%[%]]+):?(%d*)$") end
+    if not host then return nil end
+    return scheme, host:lower(), port ~= "" and port or (scheme == "https" and "443" or "80")
+end
+
+--- A redirect may only move to the same host, and never from https down to http,
+-- because every request carries the API key.
+function KavitaApi.redirectAllowed(from, to)
+    local s1, h1, p1 = splitUrl(from)
+    local s2, h2, p2 = splitUrl(to)
+    if not (s1 and s2) or h1 ~= h2 then return false end
+    if s1 == "https" and s2 == "http" then return false end
+    return p1 == p2 or (s1 == "http" and s2 == "https" and p1 == "80" and p2 == "443")
+end
+
 --- Older Kavita versions only accept a JWT on most endpoints: trade the key for one.
 function KavitaApi:login()
     local res = self:_raw("POST", "/api/plugin/authenticate?pluginName=KOReaderHighlights&apiKey=" .. urlencode(self.api_key))
@@ -102,9 +122,14 @@ function KavitaApi:_raw(method, path, body)
         raw = table.concat(sink)
         local location = type(resp_headers) == "table" and resp_headers.location
         if not (type(code) == "number" and code >= 300 and code < 400 and location) then break end
-        -- Rebase on the redirect target so later calls go straight there
         local new_base = location:match("^(https?://.-)/api/")
-        if not new_base then break end
+        if not new_base or not KavitaApi.redirectAllowed(self.base_url, new_base) then
+            local target = self:redact(location)
+            logger.warn("KavitaHL: not following redirect from", self.base_url, "to", target)
+            return nil, string.format("%s %s → redirect to %s not followed (must stay on %s and keep https)",
+                method, (self:redact(path):gsub("%?.*$", "")), target, self.base_url), code
+        end
+        -- Rebase on the redirect target so later calls go straight there
         logger.info("KavitaHL: following redirect to", new_base)
         self.base_url = new_base
     end

@@ -84,6 +84,20 @@ function M.looseXPath(xp)
     return (xp:gsub("%[1%]", ""))
 end
 
+--- True when xpointer `xp` is the element at `prefix` or inside it, ignoring [1] indexes.
+-- A plain string prefix test would let ".../p" (from p[1]) match ".../p[3]" and ".../pre".
+function M.underPath(xp, prefix)
+    local lx, lp = M.looseXPath(xp), M.looseXPath(prefix)
+    if lx:sub(1, #lp) ~= lp then return false end
+    local nxt = lx:sub(#lp + 1, #lp + 1)
+    return nxt == "" or nxt == "/" or nxt == "."
+end
+
+--- DocFragment number of an xpointer (1-based spine index), or nil.
+function M.fragmentOf(xp)
+    return tonumber(type(xp) == "string" and xp:match("^/body/DocFragment%[(%d+)%]"))
+end
+
 --- Splits a long selected text into a head and tail search pattern (UTF-8 safe at spaces).
 -- Patterns never cross a line break, because a selection spanning paragraphs is joined
 -- with newlines and search engines don't reliably match across block boundaries.
@@ -171,55 +185,89 @@ end
 -- Sync planning ------------------------------------------------------------
 
 --- Plans a two-way sync.
--- locals:  array of { key, text, note, color }
--- remotes: array of { id, text, note, slot }   (already filtered to the current user)
+-- locals:  array of { key, text, note, color, page }
+-- remotes: array of { id, text, note, slot, page }   (already filtered to the current user)
 -- state:   map tostring(id) -> { key, note, slot } from the last successful sync
 -- Returns a table of actions. Conflicts (changed on both sides) go to the local side.
 -- A highlight deleted on one side is deleted on the other, even if it was edited there.
+-- A local highlight whose key changed but whose text and page did not is re-keyed, not recreated.
 function M.plan(locals, remotes, state)
     state = state or {}
     local actions = {
         create_remote = {}, create_local = {},
         delete_remote = {}, delete_local = {},
         update_remote = {}, update_local = {},
-        link = {},
+        link = {}, rekey = {},
     }
     local local_by_key, remote_by_id = {}, {}
     for _, l in ipairs(locals) do local_by_key[l.key] = l end
     for _, r in ipairs(remotes) do remote_by_id[tostring(r.id)] = r end
 
+    local function diff(l, r, snap)
+        local l_slot = M.colorToSlot(l.color)
+        local local_changed = not note_eq(l.note, snap.note) or l_slot ~= snap.slot
+        local remote_changed = not note_eq(r.note, snap.note) or r.slot ~= snap.slot
+        if local_changed then
+            table.insert(actions.update_remote, { id = r.id, l = l })
+        elseif remote_changed then
+            table.insert(actions.update_local, { key = l.key, r = r })
+        end
+    end
+
     local linked_keys, linked_ids = {}, {}
+    local orphans = {}
     for id, snap in pairs(state) do
         local l, r = local_by_key[snap.key], remote_by_id[id]
         if l and r then
             linked_keys[l.key], linked_ids[id] = true, true
-            local l_slot = M.colorToSlot(l.color)
-            local local_changed = not note_eq(l.note, snap.note) or l_slot ~= snap.slot
-            local remote_changed = not note_eq(r.note, snap.note) or r.slot ~= snap.slot
-            if local_changed then
-                table.insert(actions.update_remote, { id = r.id, l = l })
-            elseif remote_changed then
-                table.insert(actions.update_local, { key = l.key, r = r })
-            end
+            diff(l, r, snap)
         elseif l and not r then
             linked_keys[l.key] = true
             table.insert(actions.delete_local, { id = id, key = l.key })
         elseif r and not l then
             linked_ids[id] = true
-            table.insert(actions.delete_remote, r.id)
+            orphans[#orphans + 1] = { r = r, snap = snap }
         end
         -- neither: both deleted, the entry is simply dropped
     end
 
-    -- Pair up unlinked items with identical text (e.g. after the sync state was lost)
-    local unlinked_remote_by_text = {}
-    for _, r in ipairs(remotes) do
-        if not linked_ids[tostring(r.id)] then
-            local t = M.normalize(r.text)
-            unlinked_remote_by_text[t] = unlinked_remote_by_text[t] or {}
-            table.insert(unlinked_remote_by_text[t], r)
+    local function unlinkedByText(items, linked, keyOf)
+        local by_text = {}
+        for _, it in ipairs(items) do
+            if not linked[keyOf(it)] then
+                local t = M.normalize(it.text)
+                by_text[t] = by_text[t] or {}
+                table.insert(by_text[t], it)
+            end
+        end
+        return by_text
+    end
+
+    -- The key is the highlight's position, which KOReader rewrites when its DOM version
+    -- changes. Pair such a remote with the moved local by text before treating it as deleted.
+    -- The pages must be close, or a re-highlighted short phrase in another chapter would keep
+    -- the remote's old position.
+    local unlinked_local_by_text = unlinkedByText(locals, linked_keys, function(l) return l.key end)
+    table.sort(orphans, function(a, b) return tostring(a.r.id) < tostring(b.r.id) end)
+    for _, o in ipairs(orphans) do
+        local l
+        for i, cand in ipairs(unlinked_local_by_text[M.normalize(o.r.text)] or {}) do
+            if cand.page and o.r.page and math.abs(cand.page - o.r.page) <= 1 then
+                l = table.remove(unlinked_local_by_text[M.normalize(o.r.text)], i)
+                break
+            end
+        end
+        if l then
+            linked_keys[l.key] = true
+            table.insert(actions.rekey, { id = o.r.id, key = l.key })
+            diff(l, o.r, o.snap)
+        else
+            table.insert(actions.delete_remote, o.r.id)
         end
     end
+
+    -- Pair up unlinked items with identical text (e.g. after the sync state was lost)
+    local unlinked_remote_by_text = unlinkedByText(remotes, linked_ids, function(r) return tostring(r.id) end)
     for _, l in ipairs(locals) do
         if not linked_keys[l.key] then
             local bucket = unlinked_remote_by_text[M.normalize(l.text)]
